@@ -61,6 +61,7 @@ app.post('/api/user', async (req, res) => {
     }
     res.json(user);
   } catch (err) {
+    console.error('Ошибка в /api/user:', err);
     res.status(500).json({ error: 'Ошибка сервера при загрузке пользователя' });
   }
 });
@@ -70,7 +71,7 @@ app.post('/api/spin', async (req, res) => {
   const { userId = 'demo_user', currency, bet, targetId } = req.body;
 
   try {
-    // 1. Поиск пользователя в базе
+    // 1. Поиск или создание пользователя
     let user = await User.findOne({ telegramId: userId });
     if (!user) {
       user = new User({ telegramId: userId });
@@ -83,19 +84,21 @@ app.post('/api/spin', async (req, res) => {
       return res.status(400).json({ error: 'Предмет не найден' });
     }
 
-    // 3. Проверка и списание баланса
-    if (user.balances[currency] < bet) {
+    // 3. Проверка баланса
+    const currentBalance = user.balances[currency] || 0;
+    if (currentBalance < bet) {
       return res.status(400).json({ error: 'Недостаточно средств!' });
     }
 
-    user.balances[currency] -= bet;
+    // Списываем ставку
+    user.balances[currency] = currentBalance - bet;
 
-    // 4. Расчет шанса на СЕРВЕРЕ
+    // 4. Расчет шанса
     let chance = (bet / targetItem.price) * 92;
     if (chance > 92) chance = 92;
     if (chance < 0.1) chance = 0.1;
 
-    // 5. Определение победы на СЕРВЕРЕ
+    // 5. Определение победы
     const isWin = Math.random() * 100 <= chance;
     const chanceDeg = (chance / 100) * 360;
     let finalAngle = 0;
@@ -113,10 +116,11 @@ app.post('/api/spin', async (req, res) => {
       finalAngle = minLoss >= maxLoss ? 358 : minLoss + Math.random() * (maxLoss - minLoss);
     }
 
-    // Сохраняем обновленные балансы в MongoDB Atlas
+    // Сохраняем изменение вложенного объекта
+    user.markModified('balances');
     await user.save();
 
-    // 6. Возвращаем результат клиенту
+    // 6. Отправка ответа
     res.json({
       success: true,
       isWin,
@@ -125,7 +129,7 @@ app.post('/api/spin', async (req, res) => {
       winAmount: isWin ? targetItem.price : 0
     });
   } catch (err) {
-    console.error(err);
+    console.error('Ошибка в /api/spin:', err);
     res.status(500).json({ error: 'Ошибка сервера во время спина' });
   }
 });
