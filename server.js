@@ -1,16 +1,35 @@
 const express = require('express');
 const cors = require('cors');
+const mongoose = require('mongoose');
 
 const app = express();
-app.use(cors()); // Разрешаем фронтенду делать запросы
+app.use(cors());
 app.use(express.json());
 
-// Временная "база данных" в памяти сервера (в продакшене используй PostgreSQL/MongoDB)
-const USERS_DB = {
-  // id пользователя: балансы
-  'demo_user': { STARS: 50000, GRAM: 5000 }
-};
+// 1. Подключение к MongoDB Atlas
+const MONGO_URI = process.env.MONGO_URI;
 
+if (!MONGO_URI) {
+  console.error('❌ Ошибка: Переменная MONGO_URI не задана!');
+} else {
+  mongoose.connect(MONGO_URI)
+    .then(() => console.log('✅ Успешно подключено к MongoDB Atlas'))
+    .catch(err => console.error('❌ Ошибка подключения к MongoDB:', err));
+}
+
+// 2. Модель пользователя для БД
+const userSchema = new mongoose.Schema({
+  telegramId: { type: String, required: true, unique: true },
+  username: { type: String, default: 'Guest' },
+  balances: {
+    STARS: { type: Number, default: 50000 },
+    GRAM: { type: Number, default: 5000 }
+  }
+});
+
+const User = mongoose.model('User', userSchema);
+
+// Каталог предметов
 const CATALOG = {
   STARS: [
     { id: 1, price: 150, title: 'Ракета' },
@@ -30,61 +49,86 @@ const CATALOG = {
   ]
 };
 
-// ЭНДПОИНТ: Прокрутка рулетки (Апгрейд)
-app.post('/api/spin', (req, res) => {
-  const { userId = 'demo_user', currency, bet, targetId } = req.body;
+// ЭНДПОИНТ: Получение или создание пользователя
+app.post('/api/user', async (req, res) => {
+  const { telegramId = 'demo_user', username = 'Guest' } = req.body;
 
-  // 1. Проверка существования пользователя
-  const userBalance = USERS_DB[userId];
-  if (!userBalance) {
-    return res.status(404).json({ error: 'Пользователь не найден' });
+  try {
+    let user = await User.findOne({ telegramId });
+    if (!user) {
+      user = new User({ telegramId, username });
+      await user.save();
+    }
+    res.json(user);
+  } catch (err) {
+    res.status(500).json({ error: 'Ошибка сервера при загрузке пользователя' });
   }
-
-  // 2. Проверка предмета
-  const targetItem = CATALOG[currency]?.find(item => item.id === targetId);
-  if (!targetItem) {
-    return res.status(400).json({ error: 'Предмет не найден' });
-  }
-
-  // 3. Проверка и списание баланса
-  if (userBalance[currency] < bet) {
-    return res.status(400).json({ error: 'Недостаточно средств!' });
-  }
-
-  userBalance[currency] -= bet; // Списываем ставку
-
-  // 4. Расчет шанса на СЕРВЕРЕ
-  let chance = (bet / targetItem.price) * 92;
-  if (chance > 92) chance = 92;
-  if (chance < 0.1) chance = 0.1;
-
-  // 5. Определение победы на СЕРВЕРЕ
-  const isWin = Math.random() * 100 <= chance;
-  const chanceDeg = (chance / 100) * 360;
-  let finalAngle = 0;
-
-  if (isWin) {
-    const minWin = Math.min(5, chanceDeg / 2);
-    const maxWin = Math.max(chanceDeg - 5, minWin);
-    finalAngle = minWin + Math.random() * (maxWin - minWin);
-    
-    // Зачисляем выигрыш
-    userBalance[currency] += targetItem.price;
-  } else {
-    const minLoss = chanceDeg + 5;
-    const maxLoss = 355;
-    finalAngle = minLoss >= maxLoss ? 358 : minLoss + Math.random() * (maxLoss - minLoss);
-  }
-
-  // 6. Возвращаем результат клиенту
-  res.json({
-    success: true,
-    isWin,
-    finalAngle, // Сервер указывает точный угол остановки
-    newBalance: userBalance[currency],
-    winAmount: isWin ? targetItem.price : 0
-  });
 });
 
-const PORT = 3000;
-app.listen(PORT, () => console.log(`🚀 Сервер запущен на http://localhost:${PORT}`));
+// ЭНДПОИНТ: Прокрутка рулетки (Апгрейд)
+app.post('/api/spin', async (req, res) => {
+  const { userId = 'demo_user', currency, bet, targetId } = req.body;
+
+  try {
+    // 1. Поиск пользователя в базе
+    let user = await User.findOne({ telegramId: userId });
+    if (!user) {
+      user = new User({ telegramId: userId });
+      await user.save();
+    }
+
+    // 2. Проверка предмета
+    const targetItem = CATALOG[currency]?.find(item => item.id === targetId);
+    if (!targetItem) {
+      return res.status(400).json({ error: 'Предмет не найден' });
+    }
+
+    // 3. Проверка и списание баланса
+    if (user.balances[currency] < bet) {
+      return res.status(400).json({ error: 'Недостаточно средств!' });
+    }
+
+    user.balances[currency] -= bet;
+
+    // 4. Расчет шанса на СЕРВЕРЕ
+    let chance = (bet / targetItem.price) * 92;
+    if (chance > 92) chance = 92;
+    if (chance < 0.1) chance = 0.1;
+
+    // 5. Определение победы на СЕРВЕРЕ
+    const isWin = Math.random() * 100 <= chance;
+    const chanceDeg = (chance / 100) * 360;
+    let finalAngle = 0;
+
+    if (isWin) {
+      const minWin = Math.min(5, chanceDeg / 2);
+      const maxWin = Math.max(chanceDeg - 5, minWin);
+      finalAngle = minWin + Math.random() * (maxWin - minWin);
+
+      // Зачисляем выигрыш
+      user.balances[currency] += targetItem.price;
+    } else {
+      const minLoss = chanceDeg + 5;
+      const maxLoss = 355;
+      finalAngle = minLoss >= maxLoss ? 358 : minLoss + Math.random() * (maxLoss - minLoss);
+    }
+
+    // Сохраняем обновленные балансы в MongoDB Atlas
+    await user.save();
+
+    // 6. Возвращаем результат клиенту
+    res.json({
+      success: true,
+      isWin,
+      finalAngle,
+      newBalance: user.balances[currency],
+      winAmount: isWin ? targetItem.price : 0
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Ошибка сервера во время спина' });
+  }
+});
+
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => console.log(`🚀 Сервер запущен на порту ${PORT}`));
